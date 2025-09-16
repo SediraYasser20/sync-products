@@ -129,7 +129,11 @@ class WC_Product_Sync_API_B_To_A {
         $http_code = wp_remote_retrieve_response_code( $response );
 
         if ( $http_code < 200 || $http_code >= 300 ) {
-            WC_Product_Sync_Logger_B_To_A::log( sprintf( 'API Request Failed with status %d: %s', $http_code, $body ), 'error' );
+            if ( $http_code === 401 ) {
+                WC_Product_Sync_Logger_B_To_A::log( 'API Request Failed with status 401: Unauthorized. Please check that the API keys from Website A have at least "Write" permissions. The response from the server was: ' . $body, 'error' );
+            } else {
+                WC_Product_Sync_Logger_B_To_A::log( sprintf( 'API Request Failed with status %d: %s', $http_code, $body ), 'error' );
+            }
             return new WP_Error( 'api_request_failed', sprintf( 'API request failed with status %d: %s', $http_code, $body ), array( 'status' => $http_code, 'response' => $data ) );
         }
 

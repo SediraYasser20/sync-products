@@ -169,9 +169,23 @@ class WC_Product_Sync_Hooks {
                 if ( ! $attribute->get_variation() ) {
                     continue;
                 }
+
+                $options = array();
+                if ( $attribute->is_taxonomy() ) {
+                    $term_ids = $attribute->get_options();
+                    foreach ( $term_ids as $term_id ) {
+                        $term = get_term( $term_id, $attribute->get_name() );
+                        if ( $term && ! is_wp_error( $term ) ) {
+                            $options[] = $term->name;
+                        }
+                    }
+                } else {
+                    $options = $attribute->get_options();
+                }
+
                 $attributes[] = array(
-                    'name'   => $attribute->get_name(),
-                    'options' => $attribute->get_options(),
+                    'name'    => $attribute->get_name(),
+                    'options' => $options,
                 );
             }
             $data['attributes'] = $attributes;
