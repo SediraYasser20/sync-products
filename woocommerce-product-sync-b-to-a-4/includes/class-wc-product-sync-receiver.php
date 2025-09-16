@@ -14,6 +14,7 @@
  * - We DO NOT handle images here (per requirement).
  * - If the product already exists on B (same ID), we update basic fields.
  * - If it doesn't exist, we create a product row with that exact ID, then set fields.
+ * - Now supports variable products by handling attributes and variations.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -102,15 +103,12 @@ class WC_Product_Sync_Receiver_B {
         }
 
         // We have a product post with the exact ID; now set WooCommerce data.
-        $product = wc_get_product( $desired_id );
-        if ( ! $product ) {
-            $type      = ! empty( $data['type'] ) ? sanitize_key( $data['type'] ) : 'simple';
-            $classname = \WC_Product_Factory::get_product_classname( $desired_id, $type );
-            if ( ! class_exists( $classname ) ) {
-                $classname = 'WC_Product_Simple';
-            }
-            $product = new $classname( $desired_id );
+        $type = ! empty( $data['type'] ) ? sanitize_key( $data['type'] ) : 'simple';
+        $classname = \WC_Product_Factory::get_product_classname( $desired_id, $type );
+        if ( ! class_exists( $classname ) ) {
+            $classname = 'WC_Product_Simple';
         }
+        $product = new $classname( $desired_id );
 
         // Set basic props (no images here).
         if ( isset( $data['name'] ) ) {
@@ -120,31 +118,6 @@ class WC_Product_Sync_Receiver_B {
             $product->set_status( sanitize_key( $data['status'] ) );
         }
 
-        // Get price sync settings
-        $settings = get_option( 'wc_product_sync_b_to_a_settings' );
-        $price_sync_mode = isset( $settings['price_sync_mode'] ) ? $settings['price_sync_mode'] : 'sync_normal';
-
-        if ( 'set_to_zero' === $price_sync_mode ) {
-            $product->set_regular_price( '0' );
-            $product->set_sale_price( '' ); // Setting sale price to empty is the correct way to remove it.
-        } else {
-            // Sync prices normally
-            if ( isset( $data['regular_price'] ) ) {
-                $product->set_regular_price( wc_clean( (string) $data['regular_price'] ) );
-            }
-            if ( isset( $data['sale_price'] ) ) {
-                $product->set_sale_price( wc_clean( (string) $data['sale_price'] ) );
-            }
-        }
-        if ( isset( $data['manage_stock'] ) ) {
-            $product->set_manage_stock( (bool) $data['manage_stock'] );
-        }
-        if ( isset( $data['stock_quantity'] ) ) {
-            $product->set_stock_quantity( intval( $data['stock_quantity'] ) );
-        }
-        if ( isset( $data['stock_status'] ) ) {
-            $product->set_stock_status( sanitize_key( $data['stock_status'] ) );
-        }
         if ( isset( $data['short_description'] ) ) {
             $product->set_short_description( wp_kses_post( $data['short_description'] ) );
         }
@@ -188,6 +161,127 @@ class WC_Product_Sync_Receiver_B {
             $product->set_catalog_visibility( 'visible' );
         } else {
             $product->set_catalog_visibility( 'hidden' );
+        }
+
+        // Get price sync settings
+        $settings = get_option( 'wc_product_sync_b_to_a_settings' );
+        $price_sync_mode = isset( $settings['price_sync_mode'] ) ? $settings['price_sync_mode'] : 'sync_normal';
+
+        // Handle simple vs variable products
+        if ( $type !== 'variable' ) {
+            // Simple product handling
+            if ( 'set_to_zero' === $price_sync_mode ) {
+                $product->set_regular_price( '0' );
+                $product->set_sale_price( '' ); // Setting sale price to empty is the correct way to remove it.
+            } else {
+                // Sync prices normally
+                if ( isset( $data['regular_price'] ) ) {
+                    $product->set_regular_price( wc_clean( (string) $data['regular_price'] ) );
+                }
+                if ( isset( $data['sale_price'] ) ) {
+                    $product->set_sale_price( wc_clean( (string) $data['sale_price'] ) );
+                }
+            }
+            if ( isset( $data['manage_stock'] ) ) {
+                $product->set_manage_stock( (bool) $data['manage_stock'] );
+            }
+            if ( isset( $data['stock_quantity'] ) ) {
+                $product->set_stock_quantity( intval( $data['stock_quantity'] ) );
+            }
+            if ( isset( $data['stock_status'] ) ) {
+                $product->set_stock_status( sanitize_key( $data['stock_status'] ) );
+            }
+        } else {
+            // Variable product handling
+            // First, set attributes
+            if ( ! empty( $data['attributes'] ) && is_array( $data['attributes'] ) ) {
+                $attributes = array();
+                foreach ( $data['attributes'] as $attr ) {
+                    $attribute = new WC_Product_Attribute();
+                    $attribute->set_name( sanitize_text_field( $attr['name'] ) );
+                    $attribute->set_options( array_map( 'sanitize_text_field', $attr['options'] ) );
+                    $attribute->set_variation( true ); // Assume these are for variations
+                    $attribute->set_visible( false ); // Set as needed; default to not visible
+                    $attributes[ strtolower( $attribute->get_name() ) ] = $attribute;
+                }
+                $product->set_attributes( $attributes );
+            }
+
+            // Then, handle variations
+            if ( ! empty( $data['variations'] ) && is_array( $data['variations'] ) ) {
+                foreach ( $data['variations'] as $var_data ) {
+                    $variation_id = absint( $var_data['id'] );
+                    $existing_var = get_post( $variation_id );
+
+                    if ( ! $existing_var ) {
+                        // Create new variation with specific ID
+                        $var_postarr = array(
+                            'post_type'   => 'product_variation',
+                            'post_status' => 'publish',
+                            'post_parent' => $desired_id,
+                            'post_title'  => 'AUTO DRAFT', // Will be updated by WC
+                            'import_id'   => $variation_id,
+                        );
+                        $inserted_var_id = wp_insert_post( $var_postarr, true );
+
+                        if ( is_wp_error( $inserted_var_id ) || (int) $inserted_var_id !== (int) $variation_id ) {
+                            // Log error and skip if cannot create with exact ID
+                            if ( class_exists( 'WC_Product_Sync_Logger_B_To_A' ) ) {
+                                WC_Product_Sync_Logger_B_To_A::log( sprintf( 'Failed to create variation ID %d for product %d.', $variation_id, $desired_id ), 'error' );
+                            }
+                            continue;
+                        }
+                    } else {
+                        $inserted_var_id = $variation_id;
+                    }
+
+                    // Load variation object
+                    $variation = new WC_Product_Variation( $inserted_var_id );
+
+                    // Set variation attributes
+                    if ( ! empty( $var_data['attributes'] ) && is_array( $var_data['attributes'] ) ) {
+                        $var_attributes = array();
+                        foreach ( $var_data['attributes'] as $key => $value ) {
+                            $var_attributes[ 'attribute_' . sanitize_title( $key ) ] = sanitize_text_field( $value );
+                        }
+                        $variation->set_attributes( $var_attributes );
+                    }
+
+                    // Set prices based on mode
+                    if ( 'set_to_zero' === $price_sync_mode ) {
+                        $variation->set_regular_price( '0' );
+                        $variation->set_sale_price( '' );
+                    } else {
+                        if ( isset( $var_data['regular_price'] ) ) {
+                            $variation->set_regular_price( wc_clean( (string) $var_data['regular_price'] ) );
+                        }
+                        if ( isset( $var_data['sale_price'] ) ) {
+                            $variation->set_sale_price( wc_clean( (string) $var_data['sale_price'] ) );
+                        }
+                    }
+
+                    // Set stock
+                    if ( isset( $var_data['manage_stock'] ) ) {
+                        $variation->set_manage_stock( (bool) $var_data['manage_stock'] );
+                    }
+                    if ( isset( $var_data['stock_quantity'] ) ) {
+                        $variation->set_stock_quantity( intval( $var_data['stock_quantity'] ) );
+                    }
+                    if ( isset( $var_data['stock_status'] ) ) {
+                        $variation->set_stock_status( sanitize_key( $var_data['stock_status'] ) );
+                    }
+
+                    // Set SKU if provided
+                    if ( isset( $var_data['sku'] ) && '' !== $var_data['sku'] ) {
+                        $variation->set_sku( wc_clean( $var_data['sku'] ) );
+                    }
+
+                    $variation->save();
+                }
+
+                // After all variations are saved, update the parent variable product's price range, etc.
+                $product->sync( $desired_id );
+            }
         }
 
         $product->save();
