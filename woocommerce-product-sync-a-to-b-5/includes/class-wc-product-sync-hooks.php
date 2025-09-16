@@ -108,7 +108,22 @@ class WC_Product_Sync_Hooks {
         $response = $this->api->post( 'product-sync/create-with-id', $data );
 
         if ( is_wp_error( $response ) ) {
-            WC_Product_Sync_Logger::log( sprintf( 'Shutdown Sync: Failed to sync product ID %d. Error: %s', $product_id, $response->get_error_message() ), 'error' );
+            $error_data = $response->get_error_data();
+            $response_data = isset( $error_data['response'] ) ? $error_data['response'] : null;
+
+            // Check for our specific, known conflict error.
+            if ( isset( $error_data['status'] ) && 409 === $error_data['status'] && isset( $response_data['code'] ) && 'id_conflict' === $response_data['code'] ) {
+                WC_Product_Sync_Logger::log(
+                    sprintf(
+                        'CRITICAL SYNC ERROR for Product ID %d: The sync failed because this ID is already in use by different content (like a page or an image) on the destination site. Please check the content with ID %d on the destination site and resolve the conflict manually.',
+                        $product_id,
+                        $product_id
+                    ),
+                    'critical'
+                );
+            } else {
+                WC_Product_Sync_Logger::log( sprintf( 'Shutdown Sync: Failed to sync product ID %d. Error: %s', $product_id, $response->get_error_message() ), 'error' );
+            }
         } else {
             WC_Product_Sync_Logger::log( sprintf( 'Shutdown Sync: Successfully synced product ID %d.', $product_id ), 'info' );
         }
